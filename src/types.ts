@@ -38,6 +38,8 @@ export interface FieldSchema {
   required: boolean;
   /** Machine-readable purpose of this field. */
   description: string;
+  /** Max character length. Enforced server-side before fulfillment. */
+  maxLength?: number;
 }
 
 /** Payload passed to the fulfillment handler after payment verification. */

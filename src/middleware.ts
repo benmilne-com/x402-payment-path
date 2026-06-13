@@ -39,9 +39,31 @@ export async function paymentPath(
     );
   }
 
+  const contentLength = parseInt(request.headers.get("Content-Length") ?? "0", 10);
+  if (contentLength > MAX_BODY_BYTES) {
+    return jsonResponse(
+      { error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` },
+      413,
+    );
+  }
+
+  let rawBody: string;
+  try {
+    rawBody = await request.text();
+  } catch {
+    rawBody = "{}";
+  }
+
+  if (rawBody.length > MAX_BODY_BYTES) {
+    return jsonResponse(
+      { error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` },
+      413,
+    );
+  }
+
   let body: Record<string, unknown> = {};
   try {
-    body = (await request.json()) as Record<string, unknown>;
+    body = JSON.parse(rawBody) as Record<string, unknown>;
   } catch {
     body = {};
   }
@@ -191,6 +213,9 @@ function detectFacilitator(
   return config.accepts[0]?.facilitatorUrl ?? "https://x402.stablecoin.xyz";
 }
 
+/** Default max request body size: 64 KB. */
+const MAX_BODY_BYTES = 65_536;
+
 function validateFields(
   body: Record<string, unknown>,
   fields?: PaymentPathConfig["fields"],
@@ -198,10 +223,17 @@ function validateFields(
   if (!fields) return [];
   const errors: string[] = [];
   for (const field of fields) {
-    if (!field.required) continue;
     const value = body[field.name];
-    if (value === undefined || value === null || value === "") {
+
+    if (field.required && (value === undefined || value === null || value === "")) {
       errors.push(`${field.name} is required`);
+      continue;
+    }
+
+    if (value !== undefined && value !== null && typeof value === "string") {
+      if (field.maxLength && value.length > field.maxLength) {
+        errors.push(`${field.name} exceeds max length of ${field.maxLength}`);
+      }
     }
   }
   return errors;
