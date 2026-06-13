@@ -189,7 +189,7 @@ Content-Type: application/json
 }
 ```
 
-The `PAYMENT-REQUIRED` header contains the full payment requirements (including `facilitator` address, `maxTimeoutSeconds`, `extra` metadata) that the x402 client SDK needs to sign the permit.
+The `PAYMENT-REQUIRED` header contains the full payment requirements (including `facilitator` address, `maxTimeoutSeconds`, `extra` metadata) that the x402 client library needs to sign the permit.
 
 ## Runtime compatibility
 
