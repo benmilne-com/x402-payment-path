@@ -10,7 +10,7 @@ import { paymentPath } from "x402-payment-path";
 export default {
   async fetch(request: Request, env: Env) {
     return paymentPath(request, {
-      price: "$0.10",
+      price: "$1.00",
       payTo: "0xYourWallet",
       accepts: [
         {
@@ -60,7 +60,7 @@ npm install x402-payment-path
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `price` | `string` | Yes | Price in USD, e.g. `"$0.10"` |
+| `price` | `string` | Yes | Price in USD, e.g. `"$1.00"` |
 | `payTo` | `string` | Yes | Your wallet address (EVM default) |
 | `accepts` | `AcceptedAsset[]` | Yes | Stablecoins and networks you accept |
 | `onFulfill` | `FulfillmentHandler` | Yes | Called after on-chain settlement |
@@ -117,7 +117,7 @@ Accept SBC on both Base (EVM) and Solana with separate wallet addresses:
 
 ```typescript
 {
-  price: "$0.10",
+  price: "$1.00",
   payTo: "0xYourEvmWallet",
   accepts: [
     {
@@ -170,7 +170,7 @@ Content-Type: application/json
 
 {
   "message": "Payment required",
-  "price": "$0.10",
+  "price": "$1.00",
   "accepts": [
     {
       "asset": "0xfdcC3dd6671eaB0709A4C0f3F53De9a333d80798",

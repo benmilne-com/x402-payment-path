@@ -1,6 +1,6 @@
 /** Configuration for a payment-gated endpoint. */
 export interface PaymentPathConfig {
-  /** Price in human-readable USD format, e.g. "$0.10". */
+  /** Price in human-readable USD format, e.g. "$1.00". */
   price: string;
   /** Wallet address that receives payment (EVM default). */
   payTo: string;
