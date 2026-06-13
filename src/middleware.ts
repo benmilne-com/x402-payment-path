@@ -154,7 +154,9 @@ function buildPaymentRequired(config: PaymentPathConfig): Response {
       asset: a.asset,
       network: a.network,
       facilitatorUrl: a.facilitatorUrl,
+      ...(a.payTo ? { payTo: a.payTo } : {}),
     })),
+    payTo: config.payTo,
     ...(config.fields ? { fields: config.fields } : {}),
   };
 
@@ -173,7 +175,7 @@ function buildPaymentRequirements(
       network: a.network,
       maxAmountRequired: parsePriceToAtomic(config.price),
       asset: a.asset,
-      payTo: config.payTo,
+      payTo: a.payTo ?? config.payTo,
       facilitatorUrl: a.facilitatorUrl,
     })),
   };

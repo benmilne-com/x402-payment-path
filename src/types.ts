@@ -23,6 +23,9 @@ export interface AcceptedAsset {
   network: string;
   /** Facilitator URL for verify and settle, e.g. "https://x402.stablecoin.xyz". */
   facilitatorUrl: string;
+  /** Override payTo for this asset/network (e.g. Solana address vs EVM address).
+   *  Falls back to the top-level `payTo` if not set. */
+  payTo?: string;
 }
 
 /** Describes a field the agent should include in the request body. */
