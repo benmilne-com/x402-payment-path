@@ -314,20 +314,27 @@ describe("paymentPath", () => {
     assert.equal(res.status, 502);
     const json = await res.json();
     assert.ok(json.error.includes("Settlement failed"));
-    assert.ok(json.fulfillment, "should include fulfillment result for debugging");
   });
 
   // --- onFulfill rejection ---
 
   it("returns 500 when onFulfill throws", async () => {
     const payment = encodePayment({ network: "eip155:8453" });
+    let callIndex = 0;
 
-    globalThis.fetch = mock.fn(async () =>
-      new Response(JSON.stringify({ valid: true, payer: "0xAgent" }), {
+    globalThis.fetch = mock.fn(async () => {
+      callIndex++;
+      if (callIndex === 1) {
+        return new Response(JSON.stringify({ isValid: true, payer: "0xAgent" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ success: true, txHash: "0xabc" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      }),
-    ) as typeof fetch;
+      });
+    }) as typeof fetch;
 
     const rejectConfig: PaymentPathConfig = {
       ...BASE_CONFIG,
@@ -344,7 +351,7 @@ describe("paymentPath", () => {
 
     assert.equal(res.status, 500);
     const json = await res.json();
-    assert.ok(json.error.includes("Fulfillment rejected"));
+    assert.ok(json.error.includes("Fulfillment failed"));
   });
 
   // --- Price parsing ---

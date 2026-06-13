@@ -1,81 +1,57 @@
 # Supported Assets, Networks, and Facilitators
 
-All facilitators listed below are **keyless** — no signup, no API keys, no accounts. They verify payment signatures and execute on-chain settlement, covering gas costs.
-
 ## Default: `x402.stablecoin.xyz`
 
-Operated by [Stablecoin Inc.](https://stablecoin.xyz) Supports both SBC and USDC across multiple networks.
+Operated by [Stablecoin Inc.](https://stablecoin.xyz) Keyless — no signup, no API keys. The facilitator pays gas for settlement.
 
-| Asset | Network | CAIP-2 ID | Notes |
-|---|---|---|---|
-| USDC | Base | `eip155:8453` | Mainnet |
-| SBC | Base | `eip155:8453` | Mainnet |
-| USDC | Base Sepolia | `eip155:84532` | Testnet |
-| SBC | Base Sepolia | `eip155:84532` | Testnet |
-| SBC | Radius | `eip155:723487` | Mainnet |
-| SBC | Radius Testnet | `eip155:72344` | Testnet |
-| SBC | Solana | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | Mainnet |
+**Important:** This facilitator uses SBC-style ERC-2612 permits on EVM networks. USDC on Base uses `transferWithAuthorization` (a different signing scheme) and is **not supported** through this facilitator. Use the Coinbase or community facilitators below for USDC.
+
+| Asset | Network | Short name | Contract | Decimals | Facilitator address |
+|---|---|---|---|---|---|
+| SBC | Base | `base` | `0xfdcC3dd6671eaB0709A4C0f3F53De9a333d80798` | 18 | `0xdeE710bB6a3b652C35B5cB74E7bdb03EE1F641E6` |
+| SBC | Base Sepolia | `base-sepolia` | `0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16` | 6 | `0xdeE710bB6a3b652C35B5cB74E7bdb03EE1F641E6` |
+| SBC | Radius | `radius` | `0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb` | 6 | `0xdeE710bB6a3b652C35B5cB74E7bdb03EE1F641E6` |
+| SBC | Solana | `solana` | `DBAzBUXaLj1qANCseUPZz4sp9F8d2sc78C4vKjhbTGMA` | 9 | `2mSjKVjzRGXcipq3DdJCijbepugfNSJCN1yVN2tgdw5K` |
 
 ### Usage
 
 ```typescript
-import { paymentPath } from "x402-payment-path";
-
-// SBC and USDC on Base via x402.stablecoin.xyz (default)
-const config = {
-  price: "$1.00",
-  payTo: "0xYourWallet",
-  accepts: [
-    { asset: "USDC", network: "eip155:8453", facilitatorUrl: "https://x402.stablecoin.xyz" },
-    { asset: "SBC",  network: "eip155:8453", facilitatorUrl: "https://x402.stablecoin.xyz" },
-  ],
-  onFulfill: async (payload, receipt) => {
-    return { status: "ok", txHash: receipt.txHash };
+accepts: [
+  {
+    asset: "0xfdcC3dd6671eaB0709A4C0f3F53De9a333d80798",
+    network: "base",
+    facilitatorUrl: "https://x402.stablecoin.xyz",
+    decimals: 18,
+    facilitatorAddress: "0xdeE710bB6a3b652C35B5cB74E7bdb03EE1F641E6",
+    extra: { name: "Stable Coin" },
   },
-};
+]
 ```
 
-## Backup: `facilitator.openx402.ai`
+### Solana notes
 
-USDC only. Operated by the x402 open-source community.
+- The receiving wallet must have an Associated Token Account (ATA) for SBC. Most wallets create this on first receive, but the facilitator does not create ATAs automatically.
+- The sending wallet must delegate the facilitator address (`2mSjKVjzRGXcipq3DdJCijbepugfNSJCN1yVN2tgdw5K`) via SPL Token `approve` before the facilitator can settle.
 
-| Asset | Network | CAIP-2 ID | Notes |
+## Other Facilitators (USDC)
+
+These facilitators support USDC but may require API keys.
+
+| Facilitator | Assets | Networks | Notes |
 |---|---|---|---|
-| USDC | Base | `eip155:8453` | Mainnet |
-| USDC | Solana | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | Mainnet |
-
-## Other Facilitators (Documented, Not Bundled)
-
-These facilitators exist but may require API keys or have limited asset/network support.
-
-| Facilitator | Assets | Notes |
-|---|---|---|
-| `api.cdp.coinbase.com/.../x402` | USDC | Coinbase CDP — requires API keys |
-| `facilitator.xpay.sh` | USDC | XPay — keyless, Base only |
-| `facilitator.svmacc.tech` | USDC | SVM Accelerator — keyless, Solana only |
+| `facilitator.openx402.ai` | USDC | Base, Solana | Community-operated, keyless |
+| `api.cdp.coinbase.com/.../x402` | USDC | Base | Coinbase CDP — requires API keys |
+| `facilitator.xpay.sh` | USDC | Base | XPay — keyless |
+| `facilitator.svmacc.tech` | USDC | Solana | SVM Accelerator — keyless |
 
 ## How Facilitators Work
 
-A facilitator sits between your server and the blockchain. When an agent pays:
+A facilitator sits between your server and the blockchain:
 
-1. Your server sends the agent's payment signature to the facilitator's `/verify` endpoint
+1. Your server sends the agent's payment signature to `/verify`
 2. The facilitator checks the signature is valid and the permit hasn't been used
-3. After your `onFulfill` callback succeeds, your server calls `/settle`
-4. The facilitator executes the on-chain transfer, paying gas on behalf of both parties
+3. Your server calls `/settle`
+4. The facilitator executes the on-chain transfer, paying gas
 5. The facilitator returns the transaction hash
 
-The facilitator never touches your funds directly — it submits the pre-signed ERC-2612 permit to the token contract, which transfers funds from the agent's wallet to your wallet.
-
-## Adding a New Asset
-
-To accept a new stablecoin or network, add an entry to your `accepts` array:
-
-```typescript
-{
-  asset: "TOKEN_NAME",       // or contract address
-  network: "eip155:CHAIN_ID", // CAIP-2 identifier
-  facilitatorUrl: "https://facilitator.example.com",
-}
-```
-
-The facilitator must support the asset/network combination.
+The facilitator never touches your funds directly — it submits the pre-signed permit to the token contract, which transfers funds from the agent's wallet to yours.

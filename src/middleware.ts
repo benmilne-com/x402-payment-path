@@ -73,14 +73,23 @@ export async function paymentPath(
     return jsonResponse({ error: "Validation failed", fields: fieldErrors }, 422);
   }
 
-  const paymentRequirements = buildPaymentRequirements(config);
+  const accepted = paymentPayload.accepted as Record<string, unknown> | undefined;
+  const paymentNetwork = (accepted?.network as string)
+    ?? (paymentPayload.network as string)
+    ?? "";
 
-  const facilitatorUrl = detectFacilitator(paymentPayload, config);
-  const facilitator = new FacilitatorClient(facilitatorUrl);
+  const matched = findMatchingAsset(config, paymentNetwork);
+  if (!matched) {
+    return buildPaymentRequired(config);
+  }
+
+  const requirement = buildSingleRequirement(matched, config);
+
+  const facilitator = new FacilitatorClient(matched.facilitatorUrl);
 
   let verifyResult;
   try {
-    verifyResult = await facilitator.verify(paymentPayload, paymentRequirements);
+    verifyResult = await facilitator.verify(paymentPayload, requirement);
   } catch (err) {
     return jsonResponse(
       { error: "Payment verification failed", detail: String(err) },
@@ -88,12 +97,32 @@ export async function paymentPath(
     );
   }
 
-  if (!verifyResult.valid) {
+  const isPaymentValid = verifyResult.isValid ?? verifyResult.valid ?? false;
+  if (!isPaymentValid) {
     return jsonResponse(
       { error: "Payment invalid", reason: verifyResult.invalidReason ?? "unknown" },
       402,
     );
   }
+
+  let settleResult;
+  try {
+    settleResult = await facilitator.settle(paymentPayload, requirement);
+  } catch (err) {
+    return jsonResponse(
+      { error: "Settlement failed", detail: String(err) },
+      502,
+    );
+  }
+
+  const receipt: PaymentReceipt = {
+    txHash: settleResult.txHash ?? settleResult.transaction ?? "",
+    network: settleResult.network ?? matched.network,
+    asset: matched.asset,
+    amount: parsePriceToAtomic(config.price, matched.decimals ?? 6),
+    from: verifyResult.payer ?? "",
+    to: matched.payTo ?? config.payTo,
+  };
 
   const fulfillmentPayload: FulfillmentPayload = {
     body,
@@ -104,48 +133,15 @@ export async function paymentPath(
     timestamp: new Date().toISOString(),
   };
 
-  const network = (paymentPayload.network as string) ?? "";
-  const pendingReceipt: PaymentReceipt = {
-    txHash: "",
-    network,
-    asset: "",
-    amount: "",
-    from: verifyResult.payer ?? "",
-    to: config.payTo,
-  };
-
   let fulfillResult: unknown;
   try {
-    fulfillResult = await config.onFulfill(fulfillmentPayload, pendingReceipt);
+    fulfillResult = await config.onFulfill(fulfillmentPayload, receipt);
   } catch (err) {
     return jsonResponse(
-      { error: "Fulfillment rejected", detail: String(err) },
+      { error: "Fulfillment failed after settlement", detail: String(err), receipt },
       500,
     );
   }
-
-  let settleResult;
-  try {
-    settleResult = await facilitator.settle(paymentPayload, paymentRequirements);
-  } catch (err) {
-    return jsonResponse(
-      {
-        error: "Settlement failed after fulfillment",
-        detail: String(err),
-        fulfillment: fulfillResult,
-      },
-      502,
-    );
-  }
-
-  const receipt: PaymentReceipt = {
-    txHash: settleResult.txHash ?? "",
-    network: settleResult.network ?? network,
-    asset: pendingReceipt.asset,
-    amount: pendingReceipt.amount,
-    from: pendingReceipt.from,
-    to: config.payTo,
-  };
 
   const responseBody = {
     ...(typeof fulfillResult === "object" && fulfillResult !== null
@@ -192,25 +188,45 @@ function buildPaymentRequirements(
 ): Record<string, unknown> {
   return {
     x402Version: 2,
-    accepts: config.accepts.map((a) => ({
-      scheme: "exact",
-      network: a.network,
-      maxAmountRequired: parsePriceToAtomic(config.price),
-      asset: a.asset,
-      payTo: a.payTo ?? config.payTo,
-      facilitatorUrl: a.facilitatorUrl,
-    })),
+    accepts: config.accepts.map((a) => buildSingleRequirement(a, config)),
   };
 }
 
-function detectFacilitator(
-  payload: Record<string, unknown>,
+/** Build a flat requirement for one asset, matching the x402 facilitator's expected shape. */
+function buildSingleRequirement(
+  asset: PaymentPathConfig["accepts"][number],
   config: PaymentPathConfig,
-): string {
-  const network = payload.network as string | undefined;
-  const match = config.accepts.find((a) => a.network === network);
-  if (match) return match.facilitatorUrl;
-  return config.accepts[0]?.facilitatorUrl ?? "https://x402.stablecoin.xyz";
+): Record<string, unknown> {
+  return {
+    scheme: "exact",
+    network: asset.network,
+    maxAmountRequired: parsePriceToAtomic(config.price, asset.decimals ?? 6),
+    asset: asset.asset,
+    payTo: asset.payTo ?? config.payTo,
+    facilitatorUrl: asset.facilitatorUrl,
+    maxTimeoutSeconds: 300,
+    ...(asset.facilitatorAddress ? { facilitator: asset.facilitatorAddress } : {}),
+    ...(asset.extra ? { extra: asset.extra } : {}),
+  };
+}
+
+/** CAIP-2 conversion table for matching client payment network to config. */
+const NETWORK_TO_CAIP2: Record<string, string> = {
+  base: "eip155:8453",
+  "base-sepolia": "eip155:84532",
+  radius: "eip155:723487",
+  "radius-testnet": "eip155:72344",
+  solana: "solana:mainnet-beta",
+  "solana-devnet": "solana:devnet",
+};
+
+function findMatchingAsset(
+  config: PaymentPathConfig,
+  paymentNetwork: string,
+): PaymentPathConfig["accepts"][number] | undefined {
+  const direct = config.accepts.find((a) => a.network === paymentNetwork);
+  if (direct) return direct;
+  return config.accepts.find((a) => NETWORK_TO_CAIP2[a.network] === paymentNetwork);
 }
 
 /** Default max request body size: 64 KB. */
@@ -239,12 +255,13 @@ function validateFields(
   return errors;
 }
 
-/** Convert "$1.00" → "1000000" (USDC 6 decimals). */
-function parsePriceToAtomic(price: string): string {
+/** Convert "$1.00" to atomic units for the given decimal precision. */
+function parsePriceToAtomic(price: string, decimals: number = 6): string {
   const cleaned = price.replace(/[^0-9.]/g, "");
-  const num = parseFloat(cleaned);
-  if (isNaN(num)) return "0";
-  return Math.round(num * 1_000_000).toString();
+  const [whole = "0", frac = ""] = cleaned.split(".");
+  const padded = frac.padEnd(decimals, "0").slice(0, decimals);
+  const raw = `${whole}${padded}`.replace(/^0+/, "");
+  return raw || "0";
 }
 
 function jsonResponse(

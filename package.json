@@ -1,6 +1,6 @@
 {
   "name": "x402-payment-path",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Gate any action behind x402 stablecoin payments. Agent-first, server-side, no client UI.",
   "type": "module",
   "main": "./dist/index.js",
@@ -41,7 +41,12 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "@stablecoin.xyz/x402": "^0.4.1",
+    "dotenv": "^17.4.2",
     "tsx": "^4.22.4",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "viem": "^2.52.2"
   }
 }

@@ -1,14 +1,14 @@
 /** Configuration for a payment-gated endpoint. */
 export interface PaymentPathConfig {
-  /** Price in human-readable USD format, e.g. "$1.00". */
+  /** Price in human-readable USD format, e.g. "$0.10". */
   price: string;
-  /** Wallet address that receives payment. */
+  /** Wallet address that receives payment (EVM default). */
   payTo: string;
   /** Accepted stablecoins, networks, and facilitators. */
   accepts: AcceptedAsset[];
-  /** Called after payment is verified, before settlement.
+  /** Called after payment is settled on-chain.
    *  Return value becomes the 200 response body (JSON).
-   *  Throw to reject fulfillment — payment will not be settled. */
+   *  Receipt includes the settlement tx hash. */
   onFulfill: FulfillmentHandler;
   /** Describes expected fields in the request body.
    *  Included in the 402 response so agents can self-discover what to send. */
@@ -17,15 +17,21 @@ export interface PaymentPathConfig {
 
 /** A stablecoin + network + facilitator combination the server accepts. */
 export interface AcceptedAsset {
-  /** Token name or contract address, e.g. "USDC" or "0x833589f...". */
+  /** Token contract address, e.g. "0x833589f..." or Solana mint address. */
   asset: string;
-  /** CAIP-2 network identifier, e.g. "eip155:8453" for Base. */
+  /** Network short name matching the x402 SDK, e.g. "base", "solana", "radius". */
   network: string;
   /** Facilitator URL for verify and settle, e.g. "https://x402.stablecoin.xyz". */
   facilitatorUrl: string;
   /** Override payTo for this asset/network (e.g. Solana address vs EVM address).
    *  Falls back to the top-level `payTo` if not set. */
   payTo?: string;
+  /** Token decimals for converting USD price to atomic units (default: 6). */
+  decimals?: number;
+  /** On-chain facilitator signer address (included in the 402 requirement). */
+  facilitatorAddress?: string;
+  /** Token metadata passed in the `extra` field (e.g. `{ name: "Stable Coin" }`). */
+  extra?: Record<string, unknown>;
 }
 
 /** Describes a field the agent should include in the request body. */
@@ -85,7 +91,8 @@ export interface X402PaymentPayload {
 
 /** Facilitator /verify response. */
 export interface VerifyResponse {
-  valid: boolean;
+  valid?: boolean;
+  isValid?: boolean;
   invalidReason?: string;
   payer?: string;
 }
@@ -94,6 +101,8 @@ export interface VerifyResponse {
 export interface SettleResponse {
   success: boolean;
   txHash?: string;
+  transaction?: string;
   network?: string;
-  invalidReason?: string;
+  error?: string;
+  errorReason?: string;
 }
