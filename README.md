@@ -4,6 +4,8 @@ Gate any action behind x402 stablecoin payments.
 
 Agent-first. Server-side. No client UI. One function call.
 
+Read the full write-up: [Talking to Agents](https://benmilne.com/talking-to-agents) — how this library was built, tested on chain, and what I learned.
+
 ```typescript
 import { paymentPath } from "x402-payment-path";
 
