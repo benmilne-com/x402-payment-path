@@ -1,6 +1,6 @@
 {
   "name": "x402-payment-path",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Gate any action behind x402 stablecoin payments. Agent-first, server-side, no client UI.",
   "type": "module",
   "main": "./dist/index.js",

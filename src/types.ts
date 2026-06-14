@@ -13,6 +13,36 @@ export interface PaymentPathConfig {
   /** Describes expected fields in the request body.
    *  Included in the 402 response so agents can self-discover what to send. */
   fields?: FieldSchema[];
+  /**
+   * Deduplication store for replay protection. When provided, each
+   * PAYMENT-SIGNATURE is hashed and checked against the store before
+   * processing. Without this, replay protection depends entirely on the
+   * facilitator.
+   *
+   * Implementations must be safe for concurrent access.
+   */
+  deduplicationStore?: DeduplicationStore;
+  /**
+   * Called when onFulfill throws after a successful on-chain settlement.
+   * The payment is settled but the action failed — use this to queue a
+   * retry, issue a refund, or alert an operator.
+   *
+   * If not provided, the error is returned to the caller as a 500 with
+   * the receipt (so the agent can prove payment).
+   */
+  onFulfillmentFailure?: (
+    error: unknown,
+    payload: FulfillmentPayload,
+    receipt: PaymentReceipt,
+  ) => Promise<void>;
+  /**
+   * CORS origin. Set to a specific origin (e.g. "https://myapp.com") or
+   * "*" for wildcard. Defaults to undefined (no CORS headers emitted).
+   * Agent-to-server flows typically don't need CORS.
+   */
+  corsOrigin?: string;
+  /** Maximum request body size in bytes. Default: 65536 (64 KB). */
+  maxBodyBytes?: number;
 }
 
 /** A stablecoin + network + facilitator combination the server accepts. */
@@ -80,6 +110,16 @@ export type FulfillmentHandler = (
   payload: FulfillmentPayload,
   receipt: PaymentReceipt,
 ) => Promise<unknown>;
+
+/**
+ * Deduplication store interface for replay protection.
+ * `has` returns true if the key was already seen.
+ * `add` marks the key as seen. Implementations should be idempotent.
+ */
+export interface DeduplicationStore {
+  has(key: string): Promise<boolean>;
+  add(key: string): Promise<void>;
+}
 
 /** Internal representation of the x402 payment payload from the agent. */
 export interface X402PaymentPayload {

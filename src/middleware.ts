@@ -5,19 +5,38 @@ import type {
 } from "./types.js";
 import { FacilitatorClient } from "./facilitator.js";
 
+const DEFAULT_MAX_BODY_BYTES = 65_536;
+
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /**
  * Gate a request behind x402 stablecoin payment.
  *
+ * - Non-POST/OPTIONS → 405
  * - No PAYMENT-SIGNATURE header → 402 with payment requirements + field schema
- * - Valid PAYMENT-SIGNATURE → verify, fulfill, settle, return receipt
+ * - Valid PAYMENT-SIGNATURE → verify, settle, fulfill, return receipt
  * - Invalid payment → 400
  */
 export async function paymentPath(
   request: Request,
   config: PaymentPathConfig,
 ): Promise<Response> {
+  const corsOrigin = config.corsOrigin;
+
   if (request.method === "OPTIONS") {
-    return corsResponse(204);
+    if (!corsOrigin) return new Response(null, { status: 204 });
+    return corsResponse(204, corsOrigin);
+  }
+
+  if (request.method !== "POST") {
+    return jsonResponse(
+      { error: "Method not allowed" },
+      405,
+      corsOrigin,
+      { Allow: "POST, OPTIONS" },
+    );
   }
 
   const paymentHeader = request.headers.get("PAYMENT-SIGNATURE")
@@ -36,28 +55,33 @@ export async function paymentPath(
     return jsonResponse(
       { error: "Invalid PAYMENT-SIGNATURE header: not valid base64-encoded JSON" },
       400,
+      corsOrigin,
     );
   }
 
-  const contentLength = parseInt(request.headers.get("Content-Length") ?? "0", 10);
-  if (contentLength > MAX_BODY_BYTES) {
-    return jsonResponse(
-      { error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` },
-      413,
-    );
+  // Replay protection: hash the payment header and check the dedup store
+  if (config.deduplicationStore) {
+    const sigHash = await hashPaymentSignature(paymentHeader);
+    if (await config.deduplicationStore.has(sigHash)) {
+      return jsonResponse(
+        { error: "Duplicate payment signature" },
+        409,
+        corsOrigin,
+      );
+    }
+    await config.deduplicationStore.add(sigHash);
   }
+
+  const maxBody = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
   let rawBody: string;
   try {
-    rawBody = await request.text();
+    rawBody = await readLimitedBody(request, maxBody);
   } catch {
-    rawBody = "{}";
-  }
-
-  if (rawBody.length > MAX_BODY_BYTES) {
     return jsonResponse(
-      { error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` },
+      { error: `Request body too large (max ${maxBody} bytes)` },
       413,
+      corsOrigin,
     );
   }
 
@@ -68,9 +92,11 @@ export async function paymentPath(
     body = {};
   }
 
+  stripDangerousKeys(body);
+
   const fieldErrors = validateFields(body, config.fields);
   if (fieldErrors.length > 0) {
-    return jsonResponse({ error: "Validation failed", fields: fieldErrors }, 422);
+    return jsonResponse({ error: "Validation failed", fields: fieldErrors }, 422, corsOrigin);
   }
 
   const accepted = paymentPayload.accepted as Record<string, unknown> | undefined;
@@ -90,10 +116,11 @@ export async function paymentPath(
   let verifyResult;
   try {
     verifyResult = await facilitator.verify(paymentPayload, requirement);
-  } catch (err) {
+  } catch {
     return jsonResponse(
-      { error: "Payment verification failed", detail: String(err) },
+      { error: "Payment verification failed" },
       502,
+      corsOrigin,
     );
   }
 
@@ -102,16 +129,18 @@ export async function paymentPath(
     return jsonResponse(
       { error: "Payment invalid", reason: verifyResult.invalidReason ?? "unknown" },
       402,
+      corsOrigin,
     );
   }
 
   let settleResult;
   try {
     settleResult = await facilitator.settle(paymentPayload, requirement);
-  } catch (err) {
+  } catch {
     return jsonResponse(
-      { error: "Settlement failed", detail: String(err) },
+      { error: "Settlement failed" },
       502,
+      corsOrigin,
     );
   }
 
@@ -137,9 +166,17 @@ export async function paymentPath(
   try {
     fulfillResult = await config.onFulfill(fulfillmentPayload, receipt);
   } catch (err) {
+    if (config.onFulfillmentFailure) {
+      try {
+        await config.onFulfillmentFailure(err, fulfillmentPayload, receipt);
+      } catch {
+        // Best-effort — the failure handler itself failed
+      }
+    }
     return jsonResponse(
-      { error: "Fulfillment failed after settlement", detail: String(err), receipt },
+      { error: "Fulfillment failed after settlement", receipt },
       500,
+      corsOrigin,
     );
   }
 
@@ -156,7 +193,7 @@ export async function paymentPath(
     network: receipt.network,
   }));
 
-  return jsonResponse(responseBody, 200, {
+  return jsonResponse(responseBody, 200, corsOrigin, {
     "PAYMENT-RESPONSE": paymentResponse,
   });
 }
@@ -178,7 +215,7 @@ function buildPaymentRequired(config: PaymentPathConfig): Response {
     ...(config.fields ? { fields: config.fields } : {}),
   };
 
-  return jsonResponse(body, 402, {
+  return jsonResponse(body, 402, config.corsOrigin, {
     "PAYMENT-REQUIRED": encodedRequirements,
   });
 }
@@ -229,9 +266,6 @@ function findMatchingAsset(
   return config.accepts.find((a) => NETWORK_TO_CAIP2[a.network] === paymentNetwork);
 }
 
-/** Default max request body size: 64 KB. */
-const MAX_BODY_BYTES = 65_536;
-
 function validateFields(
   body: Record<string, unknown>,
   fields?: PaymentPathConfig["fields"],
@@ -246,13 +280,85 @@ function validateFields(
       continue;
     }
 
-    if (value !== undefined && value !== null && typeof value === "string") {
-      if (field.maxLength && value.length > field.maxLength) {
-        errors.push(`${field.name} exceeds max length of ${field.maxLength}`);
+    if (value === undefined || value === null) continue;
+
+    if (typeof value !== "string") {
+      errors.push(`${field.name} must be a string`);
+      continue;
+    }
+
+    if (field.maxLength && value.length > field.maxLength) {
+      errors.push(`${field.name} exceeds max length of ${field.maxLength}`);
+    }
+
+    if (field.type === "email" && !EMAIL_RE.test(value)) {
+      errors.push(`${field.name} is not a valid email address`);
+    }
+
+    if (field.type === "url") {
+      try {
+        const parsed = new URL(value);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+          errors.push(`${field.name} must use http or https`);
+        }
+      } catch {
+        errors.push(`${field.name} is not a valid URL`);
       }
     }
   }
   return errors;
+}
+
+/** Recursively strip prototype-pollution keys from a parsed JSON object. */
+function stripDangerousKeys(obj: Record<string, unknown>): void {
+  for (const key of Object.keys(obj)) {
+    if (DANGEROUS_KEYS.has(key)) {
+      delete obj[key];
+    } else if (typeof obj[key] === "object" && obj[key] !== null && !Array.isArray(obj[key])) {
+      stripDangerousKeys(obj[key] as Record<string, unknown>);
+    }
+  }
+}
+
+/**
+ * Read request body with a hard byte limit. Reads the stream incrementally
+ * and throws if the body exceeds maxBytes — never buffers the full oversized
+ * payload in memory.
+ */
+async function readLimitedBody(request: Request, maxBytes: number): Promise<string> {
+  const reader = request.body?.getReader();
+  if (!reader) return "{}";
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      reader.cancel();
+      throw new Error("Body too large");
+    }
+    chunks.push(value);
+  }
+
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+/** SHA-256 hash of the payment signature header for deduplication. */
+async function hashPaymentSignature(header: string): Promise<string> {
+  const data = new TextEncoder().encode(header);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /** Convert "$1.00" to atomic units for the given decimal precision. */
@@ -267,30 +373,31 @@ function parsePriceToAtomic(price: string, decimals: number = 6): string {
 function jsonResponse(
   data: unknown,
   status: number,
+  corsOrigin?: string,
   extraHeaders?: Record<string, string>,
 ): Response {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, PAYMENT-SIGNATURE, X-PAYMENT",
-      "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE",
-      ...extraHeaders,
-    },
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json; charset=utf-8",
+    ...extraHeaders,
+  };
+
+  if (corsOrigin) {
+    headers["Access-Control-Allow-Origin"] = corsOrigin;
+    headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
+    headers["Access-Control-Allow-Headers"] = "Content-Type, PAYMENT-SIGNATURE, X-PAYMENT";
+    headers["Access-Control-Expose-Headers"] = "PAYMENT-REQUIRED, PAYMENT-RESPONSE";
+  }
+
+  return new Response(JSON.stringify(data, null, 2), { status, headers });
 }
 
-function corsResponse(status: number): Response {
+function corsResponse(status: number, origin: string): Response {
   return new Response(null, {
     status,
     headers: {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, PAYMENT-SIGNATURE, X-PAYMENT",
+      "Access-Control-Allow-Headers": "Content-Type, PAYMENT-SIGNATURE, X-PAYMENT",
       "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE",
     },
   });

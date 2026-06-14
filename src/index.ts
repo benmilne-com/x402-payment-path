@@ -7,4 +7,5 @@ export type {
   FulfillmentHandler,
   FulfillmentPayload,
   PaymentReceipt,
+  DeduplicationStore,
 } from "./types.js";

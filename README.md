@@ -67,6 +67,10 @@ npm install x402-payment-path
 | `accepts` | `AcceptedAsset[]` | Yes | Stablecoins and networks you accept |
 | `onFulfill` | `FulfillmentHandler` | Yes | Called after on-chain settlement |
 | `fields` | `FieldSchema[]` | No | Describes expected request body fields |
+| `deduplicationStore` | `DeduplicationStore` | No | Replay protection — rejects duplicate payment signatures |
+| `onFulfillmentFailure` | `function` | No | Called when `onFulfill` throws after successful settlement |
+| `corsOrigin` | `string` | No | CORS origin (`"*"` or specific). Default: no CORS headers |
+| `maxBodyBytes` | `number` | No | Max request body size in bytes (default: 65536) |
 
 ### `AcceptedAsset`
 
@@ -192,6 +196,53 @@ Content-Type: application/json
 ```
 
 The `PAYMENT-REQUIRED` header contains the full payment requirements (including `facilitator` address, `maxTimeoutSeconds`, `extra` metadata) that the x402 client library needs to sign the permit.
+
+## Security
+
+### Replay protection
+
+Without a `deduplicationStore`, replay protection depends entirely on the facilitator. For production use, provide a store that persists seen payment signature hashes. The interface is two methods:
+
+```typescript
+interface DeduplicationStore {
+  has(key: string): Promise<boolean>;
+  add(key: string): Promise<void>;
+}
+```
+
+On Cloudflare Workers, a KV-backed implementation takes ~10 lines:
+
+```typescript
+const deduplicationStore = {
+  async has(key: string) {
+    return (await env.PAYMENT_DEDUP.get(key)) !== null;
+  },
+  async add(key: string) {
+    await env.PAYMENT_DEDUP.put(key, "1", { expirationTtl: 86400 });
+  },
+};
+```
+
+### Fulfillment failure recovery
+
+If `onFulfill` throws after payment is settled on-chain, the agent has paid but received nothing. The `onFulfillmentFailure` callback lets you queue a retry, issue a refund, or alert an operator:
+
+```typescript
+onFulfillmentFailure: async (error, payload, receipt) => {
+  await deadLetterQueue.send({ error: String(error), payload, receipt });
+},
+```
+
+The receipt (including `txHash`) is always returned in the 500 response so the agent can prove payment.
+
+### Request hardening
+
+- **POST-only**: GET, PUT, DELETE, and other methods return 405.
+- **Body size limit**: Streaming body reader rejects oversized payloads before buffering. Configure via `maxBodyBytes`.
+- **Field type validation**: `type: "email"` is validated against a pattern. `type: "url"` is validated via `URL()` and restricted to `http`/`https`. Non-string values are rejected for all declared fields.
+- **Prototype pollution protection**: `__proto__`, `constructor`, and `prototype` keys are recursively stripped from the parsed request body.
+- **No information leakage**: Internal error details (stack traces, connection strings, facilitator URLs) are never returned to the caller. Only generic error messages are sent.
+- **CORS is opt-in**: No CORS headers are emitted unless `corsOrigin` is explicitly set. Agent-to-server flows don't need CORS.
 
 ## Runtime compatibility
 
